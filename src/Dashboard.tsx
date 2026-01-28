@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect,useMemo, useState } from "react";
 import { Metric, TimeRange } from "./types";
-import { fetchMetric } from "./api";
+import { fetchMetric, fetchMetricsBatch } from "./api";
 
 const widgetIds: number[] = Array.from({ length: 60 }, function (_, index) {
   return index + 1;
@@ -13,31 +13,31 @@ const Dashboard: React.FC = () => {
   const [refreshIndex, setRefreshIndex] = useState<number>(0);
 
   useEffect(function () {
+    let isCancelled = false;
     setIsLoading(true);
-    const newMetrics: Record<number, Metric> = {};
-    let completed = 0;
-    widgetIds.forEach(function (id) {
-      fetchMetric(id).then(function (response) {
+
+    fetchMetricsBatch(widgetIds).then(function (responses) {
+      if (isCancelled) {
+        return;
+      }
+
+      const newMetrics: Record<number, Metric> = {};
+      responses.forEach(function (response) {
         const metric: Metric = {
           id: response.id,
           name: "Widget " + String(response.id) + " (" + timeRange + ")",
           value: response.value
         };
-        newMetrics[id] = metric;
-        completed += 1;
-        if (completed === widgetIds.length) {
-          setMetrics(newMetrics);
-          setIsLoading(false);
-        } else {
-          setMetrics(function (previous) {
-            return {
-              ...previous,
-              [id]: metric
-            };
-          });
-        }
+        newMetrics[response.id] = metric;
       });
+
+      setMetrics(newMetrics);
+      setIsLoading(false);
     });
+
+    return function () {
+      isCancelled = true;
+    }
   }, [timeRange, refreshIndex]);
 
   const handleTimeRangeChange = function (event: React.ChangeEvent<HTMLSelectElement>) {
@@ -48,6 +48,28 @@ const Dashboard: React.FC = () => {
   const handleRefreshClick = function () {
     setRefreshIndex(refreshIndex + 1);
   };
+
+  const widgetRefreshHandlers = useMemo(function () {
+    const handlers: Record<number,()=> void> = {};
+    widgetIds.forEach(function (id) {
+      handlers[id] = function () {
+        fetchMetric(id).then(function (response) {
+          const metric: Metric = {
+            id: response.id,
+            name: "Widget " + String(response.id) + " (" + timeRange + ")",
+            value: response.value
+          };
+          setMetrics(function (previous) {
+            return {
+              ...previous,
+              [id]: metric
+            };
+          });
+        });
+      };
+    });
+    return handlers;
+  },[timeRange]);
 
   return (
     <div style={{ padding: "16px", fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif" }}>
@@ -91,22 +113,7 @@ const Dashboard: React.FC = () => {
               key={id}
               metric={metrics[id]}
               timeRange={timeRange}
-              onRefresh={function () {
-                fetchMetric(id).then(function (response) {
-                  const metric: Metric = {
-                    id: response.id,
-                    name: "Widget " + String(response.id) + " (" + timeRange + ")",
-                    value: response.value
-                  };
-                  setMetrics(function (previous) {
-                    return {
-                      ...previous,
-                      [id]: metric
-                    };
-                  });
-                });
-              }}
-            />
+              onRefresh={widgetRefreshHandlers[id]}/>
           );
         })}
       </div>
@@ -120,7 +127,9 @@ interface WidgetCardProps {
   onRefresh: () => void;
 }
 
-const WidgetCard: React.FC<WidgetCardProps> = function (props) {
+const processedValueCache = new Map<number, number | null>();
+
+const WidgetCardInner: React.FC<WidgetCardProps> = function (props) {
   const metric = props.metric;
   const timeRange = props.timeRange;
   const onRefresh = props.onRefresh;
@@ -130,6 +139,12 @@ const WidgetCard: React.FC<WidgetCardProps> = function (props) {
   useEffect(
     function () {
       if (metric) {
+        const cachedValue = processedValueCache.get(metric.id);
+        if (cachedValue !== undefined) {
+          setLocalValue(cachedValue);
+          return;
+        }
+
         const baseValue = metric.value;
         const values = Array.from({ length: 2000 }, function (_, index) {
           return index + baseValue;
@@ -137,6 +152,8 @@ const WidgetCard: React.FC<WidgetCardProps> = function (props) {
         const sum = values.reduce(function (accumulator, value) {
           return accumulator + value;
         }, 0);
+
+        processedValueCache.set(metric.id, sum);
         setLocalValue(sum);
       } else {
         setLocalValue(null);
@@ -181,5 +198,31 @@ const WidgetCard: React.FC<WidgetCardProps> = function (props) {
     </div>
   );
 };
+
+const WidgetCard = React.memo(
+  WidgetCardInner,
+  function areEqual(previous: Readonly<WidgetCardProps>, next: Readonly<WidgetCardProps>) {
+    const previousMetric = previous.metric;
+    const nextMetric = next.metric;
+
+    if (!previousMetric && !nextMetric) {
+      return (
+        previous.timeRange === next.timeRange &&
+        previous.onRefresh === next.onRefresh
+      );
+    }
+
+    if (!previousMetric || !nextMetric) {
+      return false;
+    }
+
+    return (
+      previousMetric.id === nextMetric.id &&
+      previousMetric.value === nextMetric.value &&
+      previous.timeRange === next.timeRange &&
+      previous.onRefresh === next.onRefresh
+    );
+  }
+);
 
 export default Dashboard;
